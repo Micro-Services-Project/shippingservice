@@ -1,77 +1,73 @@
 pipeline {
     agent any
-
     environment {
-        IMAGE_NAME = "manojkrishnappa/shippingservice:${GIT_COMMIT}"
+        IMAGE_NAME="obitomanu/shippingservice:${GIT_COMMIT}"
     }
-
     stages {
-
-        stage('Git Checkout') {
+        stage("clean workspace") {
             steps {
-                git url: 'https://github.com/ITkannadigaru/shippingservice.git', branch: 'main'
+                cleanWs()
             }
         }
-
-        stage('Docker Build') {
+        stage("Git-checkout") {
             steps {
-                sh '''
-                    printenv
-                    docker build -t ${IMAGE_NAME} .
-                '''
+                git branch: 'main', url: 'https://github.com/Micro-Services-Project/shippingservice.git'
             }
         }
-
-        stage('Login to Docker Hub') {
+        stage('SonarQube Analysis') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-hub-creds',
-                    usernameVariable: 'DOCKER_USERNAME',
-                    passwordVariable: 'DOCKER_PASSWORD'
-                )]) {
-                    sh "echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin"
+                script {
+                    def scannerHome = tool 'Sonar'
+
+                    withSonarQubeEnv('Sonar') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=shippingservice \
+                            -Dsonar.projectName=shippingservice \
+                            -Dsonar.sources=.
+                        """
+                    }
                 }
             }
         }
-
-        stage('Push to Docker Hub') {
+        stage("Quality Gate") {
             steps {
-                sh "docker push ${IMAGE_NAME}"
+                waitForQualityGate abortPipeline: false, credentialsId: 'Sonar'
             }
         }
-
-        stage('Update GitOps Deployment') {
+        stage("Run Unit Tests") {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-creds',
-                    usernameVariable: 'GIT_USERNAME',
-                    passwordVariable: 'GIT_PASSWORD'
-                )]) {
-                    sh '''
-                        if [ -d "gitops" ]; then
-                            echo "gitops directory exists. Removing it..."
-                            rm -rf gitops
-                        fi
-                        git clone https://$GIT_USERNAME:$GIT_PASSWORD@github.com/ITkannadigaru/GitOps.git gitops
-                        cd gitops/base/shippingservice/
-
-                        git config user.email "jenkins@ci.com"
-                        git config user.name "jenkins"
-
-                        # Update image tag
-                        sed -i "s|image: .*shippingservice.*|image: ${IMAGE_NAME}|g" deployment.yaml
-
-                        git add .
-                        git commit -m "Update shippingservice image to ${IMAGE_NAME}"
-                        git push origin main
-                    '''
+                sh 'go test ./...'
+            }
+        }
+        stage("Build") {
+            steps {
+                sh """
+                   printenv
+                   docker build -t ${IMAGE_NAME} .
+                   """
+            }
+        }
+        stage("Scan") {
+            steps {
+                sh """ 
+                   trivy image ${IMAGE_NAME} >> shippingservice-report.txt
+                   """
+                   }
+        }
+        stage ("push Image") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'Docker') {
+                        sh """
+                           docker push ${IMAGE_NAME}
+                           """
+                    }
                 }
             }
         }
-
     }
-
-    post {
+     post {
         always {
             sh "docker rmi ${IMAGE_NAME} || true"
             sh "docker logout || true"
